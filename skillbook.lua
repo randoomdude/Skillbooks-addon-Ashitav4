@@ -1,7 +1,7 @@
 addon.name = 'skillbook';
 addon.author = 'OpenAI';
-addon.version = '1.1';
-addon.desc = 'Automatically uses any FFXI skill-up book from Inventory.';
+addon.version = '2.0';
+addon.desc = 'Repeatedly uses any Inventory item selected by partial name.';
 addon.link = '';
 
 require 'common';
@@ -10,48 +10,6 @@ local chat = require 'chat';
 
 local DEFAULT_DELAY_MS = 2000;
 local MIN_DELAY_MS = 1200;
-
--- Known retail skill-up books.
--- Both full/common names and resource abbreviations are included where FFXI
--- resources / wikis commonly abbreviate the item name.
-local known_books = T{
-    -- Combat skills
-    "mikhe's memo",
-    "dagger enchiridion", "dgr. enchiridion",
-    "swing and stab",
-    "mieuseloir's diary",
-    "striking bull's diary", "bull's diary",
-    "death for dimwits", "death for dim.",
-    "ludwig's report",
-    "clash of titans",
-    "kagetora's diary",
-    "noillurie's log",
-    "ferreous's diary",
-    "kayeel-payeel's memoirs", "k-p's memoirs",
-    "perih's primer",
-    "barrels of fun",
-    "throwing weapon enchiridion", "t.w. enchiridion",
-    "mikhe's note",
-    "sonia's diary",
-    "the successor",
-    "kagetora's journal", "kage. journal",
-
-    -- Magic skills
-    "altana's hymn",
-    "coveffe musings",
-    "aid for all",
-    "investigative report", "inv. report",
-    "bounty list",
-    "dark deeds",
-    "breezy libretto",
-    "cavernous score",
-    "beaming score",
-    "yomi's diagram",
-    "astral homeland",
-    "life-form study",
-    "hrohj's record",
-    "the bell tolls",
-};
 
 local state = {
     enabled = false,
@@ -69,80 +27,173 @@ local function err(text)
     print(chat.header('SkillBook'):append(chat.error(text)));
 end
 
-local function normalize(s)
-    if (s == nil) then return ''; end
-    return string.lower(tostring(s));
+local function normalize(value)
+    return string.lower(tostring(value or ''));
 end
 
-local function is_known_book_name(name)
-    local n = normalize(name);
-    return known_books:contains(n);
+local function get_inventory()
+    return AshitaCore:GetMemoryManager():GetInventory();
 end
 
-local function get_resource_name(item_id)
-    local res = AshitaCore:GetResourceManager():GetItemById(item_id);
-    if (res == nil) then
+local function get_item_resource(item_id)
+    local resource_manager = AshitaCore:GetResourceManager();
+    if (resource_manager == nil) then
         return nil;
     end
 
-    -- English resource name is normally Name[0] in Ashita v4.
-    local name = res.Name[0];
-    if (name == nil or name == '') then
-        return nil;
-    end
-
-    return name;
+    return resource_manager:GetItemById(item_id);
 end
 
-local function scan_inventory_books()
-    local inv = AshitaCore:GetMemoryManager():GetInventory();
-    local found = {};
-
-    if (inv == nil) then
-        return found;
+local function add_name(names, seen, value)
+    if (type(value) ~= 'string' or value == '') then
+        return;
     end
 
-    -- Container 0 = normal Inventory. Usable items must be accessible there
-    -- for the regular /item command.
-    local max = inv:GetContainerCountMax(0);
-    if (max == nil or max <= 0) then
-        max = 80;
+    local key = normalize(value);
+    if (seen[key]) then
+        return;
     end
 
-    for slot = 0, max do
-        local item = inv:GetContainerItem(0, slot);
+    seen[key] = true;
+    table.insert(names, value);
+end
 
-        if (item ~= nil and item.Id ~= nil and item.Id > 0 and item.Count ~= nil and item.Count > 0) then
-            local name = get_resource_name(item.Id);
+local function collect_resource_names(resource)
+    local names = {};
+    local seen = {};
 
-            if (name ~= nil and is_known_book_name(name)) then
-                local existing = nil;
+    if (resource == nil) then
+        return names;
+    end
 
-                for _, v in ipairs(found) do
-                    if (v.id == item.Id) then
-                        existing = v;
-                        break;
-                    end
-                end
+    local function harvest(value)
+        if (type(value) == 'string') then
+            add_name(names, seen, value);
+            return;
+        end
 
-                if (existing ~= nil) then
-                    existing.count = existing.count + item.Count;
-                else
-                    table.insert(found, {
-                        id = item.Id,
-                        name = name,
-                        count = item.Count,
-                    });
-                end
+        if (value == nil) then
+            return;
+        end
+
+        for i = 0, 4 do
+            local ok, name = pcall(function()
+                return value[i];
+            end);
+
+            if (ok) then
+                add_name(names, seen, name);
+            end
+        end
+
+        for i = 1, 4 do
+            local ok, name = pcall(function()
+                return value[i];
+            end);
+
+            if (ok) then
+                add_name(names, seen, name);
             end
         end
     end
 
-    table.sort(found, function(a, b)
+    harvest(resource.Name);
+    harvest(resource.LogNameSingular);
+    harvest(resource.LogNamePlural);
+    harvest(resource.SingularName);
+    harvest(resource.PluralName);
+
+    return names;
+end
+
+local function preferred_item_name(item_id)
+    local names = collect_resource_names(get_item_resource(item_id));
+
+    for _, name in ipairs(names) do
+        if (#name <= 64 and not name:find('\n', 1, true)) then
+            return name;
+        end
+    end
+
+    return names[1];
+end
+
+local function get_inventory_max(inventory)
+    local ok, value = pcall(function()
+        return inventory:GetContainerCountMax(0);
+    end);
+
+    if (ok and type(value) == 'number' and value > 0) then
+        return value;
+    end
+
+    return 80;
+end
+
+local function scan_inventory()
+    local inventory = get_inventory();
+    local items = {};
+    local by_id = {};
+
+    if (inventory == nil) then
+        return items;
+    end
+
+    for slot = 0, get_inventory_max(inventory) do
+        local item = inventory:GetContainerItem(0, slot);
+
+        if (
+            item ~= nil and
+            item.Id ~= nil and
+            item.Id > 0 and
+            item.Count ~= nil and
+            item.Count > 0
+        ) then
+            local entry = by_id[item.Id];
+
+            if (entry == nil) then
+                local resource = get_item_resource(item.Id);
+
+                entry = {
+                    id = item.Id,
+                    name = preferred_item_name(item.Id),
+                    names = collect_resource_names(resource),
+                    count = 0,
+                };
+
+                by_id[item.Id] = entry;
+                table.insert(items, entry);
+            end
+
+            entry.count = entry.count + item.Count;
+        end
+    end
+
+    table.sort(items, function(a, b)
         return normalize(a.name) < normalize(b.name);
     end);
 
-    return found;
+    return items;
+end
+
+local function entry_matches(entry, query)
+    local q = normalize(query);
+
+    if (q == '') then
+        return false;
+    end
+
+    if (entry.name ~= nil and normalize(entry.name):find(q, 1, true) ~= nil) then
+        return true;
+    end
+
+    for _, name in ipairs(entry.names or {}) do
+        if (normalize(name):find(q, 1, true) ~= nil) then
+            return true;
+        end
+    end
+
+    return false;
 end
 
 local function count_selected()
@@ -150,82 +201,117 @@ local function count_selected()
         return 0;
     end
 
-    local inv = AshitaCore:GetMemoryManager():GetInventory();
-    if (inv == nil) then
+    local inventory = get_inventory();
+    if (inventory == nil) then
         return 0;
     end
 
     local total = 0;
-    local max = inv:GetContainerCountMax(0);
-    if (max == nil or max <= 0) then
-        max = 80;
-    end
 
-    for slot = 0, max do
-        local item = inv:GetContainerItem(0, slot);
+    for slot = 0, get_inventory_max(inventory) do
+        local item = inventory:GetContainerItem(0, slot);
+
         if (item ~= nil and item.Id == state.selected_id) then
-            total = total + item.Count;
+            total = total + (item.Count or 0);
         end
     end
 
     return total;
 end
 
-local function select_book(book)
-    if (book == nil) then
-        state.selected_id = 0;
-        state.selected_name = nil;
+local function set_by_query(query)
+    if (normalize(query) == '') then
+        err('Usage: /skillbook set <part of item name>');
         return;
     end
 
-    state.selected_id = book.id;
-    state.selected_name = book.name;
-    msg(('Selected: %s (%d in Inventory).'):fmt(book.name, book.count));
-end
+    local matches = {};
 
-local function auto_select()
-    local books = scan_inventory_books();
-
-    if (#books == 0) then
-        err('No recognized skill-up books found in normal Inventory.');
-        return false;
-    end
-
-    -- Keep the currently selected book if it is still present.
-    if (state.selected_id ~= 0) then
-        for _, book in ipairs(books) do
-            if (book.id == state.selected_id) then
-                state.selected_name = book.name;
-                return true;
-            end
+    for _, entry in ipairs(scan_inventory()) do
+        if (entry_matches(entry, query)) then
+            table.insert(matches, entry);
         end
     end
 
-    select_book(books[1]);
-
-    if (#books > 1) then
-        msg(('Found %d different skill books. Use /skillbook list or /skillbook set <name> to choose another.'):fmt(#books));
+    if (#matches == 0) then
+        err(('No Inventory item matched "%s".'):fmt(query));
+        return;
     end
 
-    return true;
+    if (#matches > 1) then
+        err(('"%s" matched %d Inventory items:'):fmt(query, #matches));
+
+        for _, entry in ipairs(matches) do
+            msg(('  %s x%d [ID %d]'):fmt(
+                entry.name or ('Item ' .. tostring(entry.id)),
+                entry.count,
+                entry.id
+            ));
+        end
+
+        msg('Use a longer name fragment.');
+        return;
+    end
+
+    local entry = matches[1];
+    state.selected_id = entry.id;
+    state.selected_name = entry.name;
+
+    msg(('Selected: %s x%d [ID %d].'):fmt(
+        entry.name or ('Item ' .. tostring(entry.id)),
+        entry.count,
+        entry.id
+    ));
+end
+
+local function list_items(query)
+    local q = normalize(query);
+    local shown = 0;
+
+    for _, entry in ipairs(scan_inventory()) do
+        if (q == '' or entry_matches(entry, q)) then
+            local marker = (entry.id == state.selected_id) and ' <selected>' or '';
+
+            msg(('  %s x%d [ID %d]%s'):fmt(
+                entry.name or ('Item ' .. tostring(entry.id)),
+                entry.count,
+                entry.id,
+                marker
+            ));
+
+            shown = shown + 1;
+        end
+    end
+
+    if (shown == 0) then
+        if (q == '') then
+            msg('No items found in normal Inventory.');
+        else
+            msg(('No Inventory items matched "%s".'):fmt(query));
+        end
+    else
+        msg(('Displayed %d Inventory item(s).'):fmt(shown));
+    end
 end
 
 local function stop(reason)
     state.enabled = false;
+
     if (reason ~= nil) then
         msg(reason);
     end
 end
 
 local function start()
-    if (not auto_select()) then
-        state.enabled = false;
+    if (state.selected_id == 0 or state.selected_name == nil) then
+        err('No item selected. Example: /skillbook set throwing');
         return;
     end
 
     local count = count_selected();
+
     if (count <= 0) then
-        err('Selected book is no longer in Inventory.');
+        err('Selected item is no longer in normal Inventory.');
         state.enabled = false;
         return;
     end
@@ -240,58 +326,9 @@ local function start()
     ));
 end
 
-local function list_books()
-    local books = scan_inventory_books();
-
-    if (#books == 0) then
-        msg('No recognized skill-up books found in normal Inventory.');
-        return;
-    end
-
-    msg(('Skill-up books in Inventory (%d types):'):fmt(#books));
-
-    for _, book in ipairs(books) do
-        local marker = (book.id == state.selected_id) and '  <selected>' or '';
-        msg(('  %s x%d%s'):fmt(book.name, book.count, marker));
-    end
-end
-
-local function set_by_query(query)
-    local q = normalize(query);
-    if (q == '') then
-        err('Usage: /skillbook set <part of book name>');
-        return;
-    end
-
-    local books = scan_inventory_books();
-    local matches = {};
-
-    for _, book in ipairs(books) do
-        if (normalize(book.name):find(q, 1, true) ~= nil) then
-            table.insert(matches, book);
-        end
-    end
-
-    if (#matches == 0) then
-        err(('No skill-up book in Inventory matched "%s".'):fmt(query));
-        return;
-    end
-
-    if (#matches > 1) then
-        err(('"%s" matched more than one book:'):fmt(query));
-        for _, book in ipairs(matches) do
-            msg(('  %s x%d'):fmt(book.name, book.count));
-        end
-        msg('Use a longer name fragment.');
-        return;
-    end
-
-    select_book(matches[1]);
-end
-
 local function print_status()
     if (state.selected_id == 0) then
-        msg(('Status: %s | no book selected | delay %.1f sec.'):fmt(
+        msg(('Status: %s | no item selected | delay %.1f sec.'):fmt(
             state.enabled and 'ON' or 'OFF',
             state.delay_ms / 1000
         ));
@@ -300,33 +337,42 @@ local function print_status()
 
     msg(('Status: %s | %s x%d | delay %.1f sec.'):fmt(
         state.enabled and 'ON' or 'OFF',
-        state.selected_name or 'Unknown',
+        state.selected_name or ('Item ' .. tostring(state.selected_id)),
         count_selected(),
         state.delay_ms / 1000
     ));
 end
 
 local function print_help()
-    msg('/skillbook on              - Start using the selected book; auto-selects if needed.');
+    msg('/skillbook set <name>      - Select ANY normal Inventory item by partial name.');
+    msg('/skillbook on              - Repeatedly use the selected item.');
     msg('/skillbook off             - Stop.');
-    msg('/skillbook list            - List recognized skill books in Inventory.');
-    msg('/skillbook set <name>      - Select by partial name, e.g. /skillbook set yomi');
-    msg('/skillbook status          - Show current book/count/status.');
+    msg('/skillbook list [text]     - List all Inventory items, or filter by text.');
+    msg('/skillbook status          - Show current selection/count/status.');
     msg('/skillbook delay <seconds> - Set repeat delay; minimum 1.2 sec.');
 end
 
 local function join_args(args, start_index)
     local parts = {};
+
     for i = start_index, #args do
         table.insert(parts, args[i]);
     end
+
     return table.concat(parts, ' ');
 end
 
-ashita.events.register('command', 'command_cb', function (e)
+ashita.events.register('command', 'command_cb', function(e)
     local args = e.command:args();
 
-    if (#args == 0 or string.lower(args[1]) ~= '/skillbook') then
+    if (#args == 0) then
+        return;
+    end
+
+    local root = string.lower(args[1]);
+
+    -- /itemloop remains available as an alias for the generic behavior.
+    if (root ~= '/skillbook' and root ~= '/itemloop') then
         return;
     end
 
@@ -339,6 +385,11 @@ ashita.events.register('command', 'command_cb', function (e)
 
     local cmd = string.lower(args[2]);
 
+    if (cmd == 'set' or cmd == 'select') then
+        set_by_query(join_args(args, 3));
+        return;
+    end
+
     if (cmd == 'on' or cmd == 'start') then
         start();
         return;
@@ -349,18 +400,13 @@ ashita.events.register('command', 'command_cb', function (e)
         return;
     end
 
-    if (cmd == 'list') then
-        list_books();
-        return;
-    end
-
-    if (cmd == 'set' or cmd == 'select') then
-        set_by_query(join_args(args, 3));
-        return;
-    end
-
     if (cmd == 'status') then
         print_status();
+        return;
+    end
+
+    if (cmd == 'list') then
+        list_items(join_args(args, 3));
         return;
     end
 
@@ -392,7 +438,7 @@ ashita.events.register('command', 'command_cb', function (e)
     print_help();
 end);
 
-ashita.events.register('d3d_present', 'present_cb', function ()
+ashita.events.register('d3d_present', 'present_cb', function()
     if (not state.enabled) then
         return;
     end
@@ -407,19 +453,19 @@ ashita.events.register('d3d_present', 'present_cb', function ()
 
     if (count <= 0) then
         stop(('No %s remain in Inventory; stopped automatically.'):fmt(
-            state.selected_name or 'selected skill books'
+            state.selected_name or 'selected items'
         ));
         return;
     end
 
     state.last_use = now;
 
-    -- Use the exact item name read from Ashita's retail resource table.
-    -- This queues the normal FFXI /item command and does not simulate keyboard input.
-    local command = ('/item "%s" <me>'):fmt(state.selected_name);
-    AshitaCore:GetChatManager():QueueCommand(-1, command);
+    AshitaCore:GetChatManager():QueueCommand(
+        -1,
+        ('/item "%s" <me>'):fmt(state.selected_name)
+    );
 end);
 
-ashita.events.register('unload', 'unload_cb', function ()
+ashita.events.register('unload', 'unload_cb', function()
     state.enabled = false;
 end);
