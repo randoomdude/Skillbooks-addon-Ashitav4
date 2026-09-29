@@ -1,61 +1,97 @@
-SkillBook - Ashita v4 addon
-Version 1.1
+# SkillBook - Ashita v4 addon
 
-Purpose
--------
-Automatically consumes any of FFXI's current skill-up book items from your
-normal Inventory by repeatedly queuing the ordinary /item command through Ashita.
+Version 2.0
 
-Install
--------
-Extract the "skillbook" folder to:
+## Purpose
 
-    Ashita\addons\skillbook\
+SkillBook repeatedly uses an item from your normal FFXI Inventory by queuing the ordinary `/item` command through Ashita.
+
+The original version only recognized a hard-coded list of skill-up books. Version 2.0 instead searches **every item in normal Inventory by partial name**, so books such as **Throwing Weapon Enchiridion** work without needing to be added to a list first.
+
+This also means it can be used with other consumable items that work with FFXI's normal `/item "<name>" <me>` command.
+
+## Install
+
+Place `skillbook.lua` in:
+
+```text
+Ashita\addons\skillbook\skillbook.lua
+```
 
 Then in FFXI:
 
-    /addon load skillbook
+```text
+/addon load skillbook
+```
 
-Examples
---------
-See what skill books you currently have:
+## Examples
 
-    /skillbook list
+### Throwing Weapon Enchiridion
 
-Select Yomi's Diagram:
+First see what the addon finds:
 
-    /skillbook set yomi
+```text
+/skillbook list throw
+```
 
-Select Dark Deeds:
+Select it:
 
-    /skillbook set dark
+```text
+/skillbook set throwing
+```
 
-Select Aid for All:
+Start repeatedly using it:
 
-    /skillbook set aid
-
-Start:
-
-    /skillbook on
+```text
+/skillbook on
+```
 
 Stop:
 
-    /skillbook off
+```text
+/skillbook off
+```
 
-Status:
+### Yomi's Diagram
 
-    /skillbook status
+```text
+/skillbook set yomi
+/skillbook on
+```
 
-Change interval:
+## Commands
 
-    /skillbook delay 2
+```text
+/skillbook set <partial item name>
+/skillbook on
+/skillbook off
+/skillbook status
+/skillbook list
+/skillbook list <filter>
+/skillbook delay 2
+/skillbook help
+```
 
-Notes
------
-* /skillbook on will auto-select a recognized skill book if none is selected.
-* If multiple different skill books are in Inventory, use /skillbook list and
-  /skillbook set <partial name> so it does not consume the wrong one.
-* It stops automatically when the selected book runs out.
-* It only looks in normal Inventory because the regular /item command needs the
-  usable item available there.
-* It does NOT automatically switch to another skill book when one runs out.
+`/itemloop` is also accepted as an alias for `/skillbook`.
+
+## Behavior
+
+- Searches **normal Inventory only**.
+- Partial-name matching is case-insensitive.
+- If a search matches multiple items, the addon lists the matches and asks for a longer name fragment instead of guessing.
+- The exact resource name of the selected item is used for the queued `/item` command.
+- The default repeat interval is **2.0 seconds**.
+- The minimum configurable interval is **1.2 seconds**.
+- It automatically stops when the selected item runs out.
+- It does **not** automatically switch to another item.
+- Items that cannot normally be activated with FFXI's `/item` command will still be searchable, but the game will not be able to use them.
+
+## Upgrade from 1.1
+
+Replace your old `skillbook.lua` with the new one and reload:
+
+```text
+/addon reload skillbook
+```
+
+The existing `/skillbook` command name is unchanged.
